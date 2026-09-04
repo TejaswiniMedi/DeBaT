@@ -6,8 +6,8 @@ model:
   target: ldm.models.autoencoder.AutoencoderKL
   params:
     monitor: val/rec_loss
-    embed_dim: 32
-    input_mode: 1 # low frequency components # hyper-param for vision foundation model alignment
+    embed_dim: 16
+    input_mode: 1 # low frequency components 
     # --------------------------------------------------
     use_vf: dinov2
     reverse_proj: true        # default: true, project from vae dim --> dinov2 dim
@@ -27,7 +27,7 @@ model:
         # --------------------------------------------------
     ddconfig:
       double_z: true
-      z_channels: 32
+      z_channels: 8
       resolution: 256
       in_channels: 3
       out_ch: 3
@@ -58,7 +58,8 @@ data:
 
 lightning:
   trainer:
-    strategy: ddp
+    strategy: ddp_find_unused_parameters_true
     accelerator: gpu
-    max_epochs: 50
+    max_epochs: 80
     precision: 32
+  
