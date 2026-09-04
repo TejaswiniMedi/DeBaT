@@ -154,6 +154,8 @@ This repository builds upon **VA-VAE / latent diffusion** and **LightningDiT**. 
       archivePrefix={arXiv},
       primaryClass={cs.CV},
       url={https://arxiv.org/abs/2509.05441}, 
-}```
+}
+```
 
-## We are process of optimizing the repo
+
+## We are in the process of optimizing the repo
