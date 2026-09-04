@@ -143,8 +143,17 @@ bash run_train.sh configs/lightningdit_xl_vavae_f16d32.yaml
 
 This repository builds upon **VA-VAE / latent diffusion** and **LightningDiT**. Please refer to the corresponding source directories for their licenses and citations.
 
-## Citation
+## Citation (will be updated)
 
-Citation information will be added soon. 
+```bash
+@misc{medi2026decouplinghighlowfrequencies,
+      title={Decoupling High and Low Frequencies for Faithful Image Generation with Fine Details}, 
+      author={Tejaswini Medi and Hsien-Yi Wang and Arianna Rampini and Margret Keuper},
+      year={2026},
+      eprint={2509.05441},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV},
+      url={https://arxiv.org/abs/2509.05441}, 
+}```
 
 ## We are process of optimizing the repo
