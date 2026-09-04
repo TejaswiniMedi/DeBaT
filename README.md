@@ -45,6 +45,30 @@ export IMAGENET_ROOT=/path/to/imagenet
 
 Avoid machine-specific absolute paths such as `/ceph/...` in configs. Prefer environment variables or paths relative to the repository.
 
+## Installation
+
+Create a Python 3.10 Conda environment:
+
+```bash
+conda create -n debat python=3.10 -y
+conda activate debat
+```
+
+Install the VA-VAE dependencies:
+
+```bash
+pip install -r vavae/requirements.txt
+```
+
+Install the LightningDiT dependencies:
+
+```bash
+pip install -r LightningDiT/requirements.txt
+```
+
+The provided setup uses PyTorch 2.2.0 with CUDA 12.1. Users with a different CUDA setup should install the corresponding PyTorch build.
+
+
 ## 1. Train VAEs
 
 Low-frequency branch:
