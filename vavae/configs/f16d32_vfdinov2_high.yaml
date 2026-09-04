@@ -1,4 +1,4 @@
-ckpt_path: logs/f16d32_vfdinov2_high_images/checkpoints/last-v2.ckpt # used for testing only, add your ckpt path if you want to test the model
+ckpt_path: /ceph/tmedi/DeBaT/logs/f16d32_vfdinov2_high/checkpoints/last.ckpt # used for testing only, add your ckpt path if you want to test the model
 # weight_init: /path/to/weight_init # if you want to finetune va-vae on your own dataset, add your weight_init path
 
 model:
@@ -6,12 +6,11 @@ model:
   target: ldm.models.autoencoder.AutoencoderKL
   params:
     monitor: val/rec_loss
-    embed_dim: 32
-    input_mode: 2 # high frequency components,
-    # hyper-param for vision foundation model alignment
+    embed_dim: 16
+    input_mode: 2 # high frequency components 
     # --------------------------------------------------
     use_vf: null
-    reverse_proj: true        # default: true, project from vae dim --> dinov2 dim
+    reverse_proj: true        
     # --------------------------------------------------
     lossconfig:
       target: ldm.modules.losses.LPIPSWithDiscriminator
@@ -30,17 +29,17 @@ model:
         # --------------------------------------------------
     ddconfig:
       double_z: true
-      z_channels: 32
-      resolution: 256    #128
+      z_channels: 8
+      resolution: 128   
       in_channels: 9
       out_ch: 3
-      ch:  128 #128
+      ch:  128 
       ch_mult:
       - 1
-      - 1   # extra_I_added!
+      - 1   
       - 2
       - 2
-      - 4
+      #- 4
       num_res_blocks: 2
       attn_resolutions:
       - 16
@@ -48,7 +47,7 @@ model:
 data:
   target: main.DataModuleFromConfig
   params:
-    batch_size: 32  #96 # batch size per GPU
+    batch_size: 16   # batch size per GPU
     wrap: true
     train:
       target: ldm.data.imagenet.ImageNetTrain
@@ -61,7 +60,8 @@ data:
 
 lightning:
   trainer:
-    strategy: ddp
+    strategy: ddp_find_unused_parameters_true
     accelerator: gpu
-    max_epochs: 50
+    max_epochs: 80
     precision: 32
+  
