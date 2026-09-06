@@ -301,41 +301,55 @@ class AutoencoderKL(pl.LightningModule):
                  use_vf=None,
                  input_mode=0,
                  reverse_proj=False,
-                 proj_fix=False
-                 ):
+                 proj_fix=False):
         super().__init__()
         self.image_key = image_key
         self.encoder = Encoder(**ddconfig)
         self.decoder = Decoder(**ddconfig)
-        self.dec_extra = torch.nn.ConvTranspose2d(
-                                    in_channels=3, out_channels=3,
-                                    kernel_size=4, stride=2, padding=1)
         self.loss = instantiate_from_config(lossconfig)
+
         assert ddconfig["double_z"]
-        self.quant_conv = torch.nn.Conv2d(2*ddconfig["z_channels"], 2*embed_dim, 1)
-        self.post_quant_conv = torch.nn.Conv2d(embed_dim, ddconfig["z_channels"], 1)
+        self.quant_conv = torch.nn.Conv2d(
+            2 * ddconfig["z_channels"], 2 * embed_dim, 1
+        )
+        self.post_quant_conv = torch.nn.Conv2d(
+            embed_dim, ddconfig["z_channels"], 1
+        )
         self.embed_dim = embed_dim
+
         if colorize_nlabels is not None:
-            assert type(colorize_nlabels)==int
-            self.register_buffer("colorize", torch.randn(3, colorize_nlabels, 1, 1))
+            assert type(colorize_nlabels) == int
+            self.register_buffer(
+                "colorize", torch.randn(3, colorize_nlabels, 1, 1)
+            )
+
         if monitor is not None:
             self.monitor = monitor
+
         if ckpt_path is not None:
             self.init_from_ckpt(ckpt_path, ignore_keys=ignore_keys)
+
         if use_vf is not None:
             self.use_vf = use_vf
             from ldm.models.foundation_models import aux_foundation_model
+
             print(f"Using {use_vf} as auxiliary feature.")
             self.foundation_model = aux_foundation_model(use_vf)
             vf_feature_dim = self.foundation_model.feature_dim
-            self.linear_proj = torch.nn.Conv2d(vf_feature_dim, embed_dim, kernel_size=1, bias=True)
+            self.linear_proj = torch.nn.Conv2d(
+                vf_feature_dim, embed_dim, kernel_size=1, bias=True
+            )
             if reverse_proj:
-                self.linear_proj = torch.nn.Conv2d(embed_dim, vf_feature_dim, kernel_size=1, bias=False)
+                self.linear_proj = torch.nn.Conv2d(
+                    embed_dim, vf_feature_dim, kernel_size=1, bias=False
+                )
         else:
             self.use_vf = None
+
         self.input_mode = input_mode
         if self.input_mode:
-            self.dwt = DWTForward(J=1, wave='haar', mode='zero')
+            self.dwt = DWTForward(J=1, wave="haar", mode="zero")
+
         self.reverse_proj = reverse_proj
         self.automatic_optimization = False
         self.proj_fix = proj_fix
@@ -343,35 +357,50 @@ class AutoencoderKL(pl.LightningModule):
     def init_from_ckpt(self, path, ignore_keys=list()):
         sd = torch.load(path, map_location="cpu")["state_dict"]
         keys = list(sd.keys())
+
         for k in keys:
             for ik in ignore_keys:
                 if k.startswith(ik):
                     print("Deleting key {} from state_dict.".format(k))
                     del sd[k]
+
         self.load_state_dict(sd, strict=False)
         print(f"Restored from {path}")
 
+    # ------------------------------------------------------------------
+    # VAE
+    # ------------------------------------------------------------------
     def encode(self, x):
         h = self.encoder(x)
         moments = self.quant_conv(h)
         posterior = DiagonalGaussianDistribution(moments)
         return posterior
-    
+
     def decode(self, z):
         z = self.post_quant_conv(z)
         dec = self.decoder(z)
         return dec
 
     def forward(self, input, sample_posterior=True):
+        """
+        Autoencode the representation passed to the model.
+
+        input_mode=2:
+            input  : [B, 9, 128, 128]
+            output : [B, 9, 128, 128]
+
+        No RGB upsampling is performed in mode 2 because the target itself is
+        the 9-channel high-frequency wavelet representation.
+        """
         posterior = self.encode(input)
+
         if sample_posterior:
             z = posterior.sample()
         else:
             z = posterior.mode()
+
         dec = self.decode(z)
-        if self.input_mode == 2:
-            dec = self.dec_extra(dec)
-            
+
         if self.use_vf is not None:
             aux_feature = self.foundation_model(input)
             if not self.reverse_proj:
@@ -382,143 +411,365 @@ class AutoencoderKL(pl.LightningModule):
 
         return dec, posterior, None, None
 
+    # ------------------------------------------------------------------
+    # Input preparation
+    # ------------------------------------------------------------------
     def get_input(self, batch, k):
         x = batch[k]
         if len(x.shape) == 3:
             x = x[..., None]
-        x = x.permute(0, 3, 1, 2).to(memory_format=torch.contiguous_format).float()
+
+        x = x.permute(
+            0, 3, 1, 2
+        ).to(
+            memory_format=torch.contiguous_format
+        ).float()
+
         return x
 
+    def prepare_vae_input(self, inputs_real):
+        """
+        mode 0: RGB -> RGB
+
+        mode 1:
+            RGB -> Haar LL -> /2 -> bicubic resize to 256x256
+
+        mode 2:
+            RGB -> Haar (LH, HL, HH)
+                [B, 3, 3, H/2, W/2]
+              -> /2
+              -> [B, 9, H/2, W/2]
+        """
+        if self.input_mode == 0:
+            return inputs_real
+
+        if self.input_mode == 1:
+            ll1, _ = self.dwt(inputs_real)
+            ll1 = ll1 / 2.0
+            return F.interpolate(
+                ll1,
+                size=256,
+                mode="bicubic",
+                align_corners=False
+            )
+
+        if self.input_mode == 2:
+            _, hs = self.dwt(inputs_real)
+            h1 = hs[0] / 2.0
+
+            b, c, n_bands, h, w = h1.shape
+            if c != 3 or n_bands != 3:
+                raise RuntimeError(
+                    "input_mode=2 expects Haar HF coefficients with shape "
+                    f"[B, 3, 3, H, W], got {tuple(h1.shape)}"
+                )
+
+            return h1.reshape(b, 9, h, w)
+
+        raise ValueError(f"Unsupported input_mode={self.input_mode}")
+
+    # ------------------------------------------------------------------
+    # HF visualization
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _hf9_to_bands(x):
+        """
+        [B, 9, H, W] -> three RGB tensors:
+            LH: [B, 3, H, W]
+            HL: [B, 3, H, W]
+            HH: [B, 3, H, W]
+        """
+        if x.ndim != 4 or x.shape[1] != 9:
+            raise ValueError(
+                f"Expected [B, 9, H, W], got {tuple(x.shape)}"
+            )
+
+        b, _, h, w = x.shape
+        x = x.reshape(b, 3, 3, h, w)
+
+        lh = x[:, :, 0, :, :]
+        hl = x[:, :, 1, :, :]
+        hh = x[:, :, 2, :, :]
+
+        return lh, hl, hh
+
+    @staticmethod
+    def _normalize_hf_for_vis(x):
+        """
+        Normalize signed wavelet coefficients independently per sample to
+        [-1, 1] for visualization ONLY.
+
+        This does not affect the tensor used by the reconstruction loss.
+        """
+        scale = x.abs().amax(
+            dim=(1, 2, 3),
+            keepdim=True
+        ).clamp_min(1e-8)
+
+        return (x / scale).clamp(-1.0, 1.0)
+
+    # ------------------------------------------------------------------
+    # Training
+    # ------------------------------------------------------------------
     def training_step(self, batch, batch_idx):
         inputs_real = self.get_input(batch, self.image_key)
-        if self.input_mode == 1: 
-            ll1, _ = self.dwt(inputs_real) # low frequency components
-            ll1 = ll1 / 2 # normalize
-            inputs = F.interpolate(ll1, size=256, mode='bicubic', align_corners=False)
-        elif self.input_mode == 2:
-            _, hs = self.dwt(inputs_real) # high frequency components
-            h1 = hs[0] / 2 # normalize
-            inputs = h1.view(-1, 9, 128, 128)
-        reconstructions, posterior, z, aux_feature = self(inputs)
-        print(inputs_real.shape)
-        ae_opt, disc_opt = self.optimizers()
+        inputs = self.prepare_vae_input(inputs_real)
 
-        # if optimizer_idx == 0:
-        # train encoder+decoder+logvar
+        reconstructions, posterior, z, aux_feature = self(inputs)
+
+        if reconstructions.shape != inputs.shape:
+            raise RuntimeError(
+                "Reconstruction must match VAE target shape. "
+                f"target={tuple(inputs.shape)}, "
+                f"reconstruction={tuple(reconstructions.shape)}. "
+                "For input_mode=2 use ddconfig.in_channels=9 and out_ch=9."
+            )
+
+        ae_opt, disc_opt = self.optimizers()
         enc_last_layer = self.encoder.conv_out.weight
-        aeloss, log_dict_ae = self.loss(inputs_real, reconstructions, posterior, 0, self.global_step,
-                                        last_layer=self.get_last_layer(), split="train", z=z, aux_feature=aux_feature, 
-                                        enc_last_layer=enc_last_layer)
-        self.log("aeloss", aeloss, prog_bar=True, logger=True, on_step=True, on_epoch=True)
-        self.log_dict(log_dict_ae, prog_bar=False, logger=True, on_step=True, on_epoch=False)
-        # return aeloss
+
+        # Autoencoder:
+        # For input_mode=2 this is HF -> HF reconstruction.
+        aeloss, log_dict_ae = self.loss(
+            inputs,
+            reconstructions,
+            posterior,
+            0,
+            self.global_step,
+            last_layer=self.get_last_layer(),
+            split="train",
+            z=z,
+            aux_feature=aux_feature,
+            enc_last_layer=enc_last_layer
+        )
+
+        self.log(
+            "aeloss",
+            aeloss,
+            prog_bar=True,
+            logger=True,
+            on_step=True,
+            on_epoch=True
+        )
+        self.log_dict(
+            log_dict_ae,
+            prog_bar=False,
+            logger=True,
+            on_step=True,
+            on_epoch=False
+        )
 
         ae_opt.zero_grad()
         self.manual_backward(aeloss)
         ae_opt.step()
 
-        # if optimizer_idx == 1:
-        # train the discriminator
-        discloss, log_dict_disc = self.loss(inputs_real, reconstructions, posterior, 1, self.global_step,
-                                            last_layer=self.get_last_layer(), split="train", enc_last_layer=enc_last_layer)
+        # Discriminator:
+        # real = same target representation, fake = reconstruction.
+        discloss, log_dict_disc = self.loss(
+            inputs,
+            reconstructions,
+            posterior,
+            1,
+            self.global_step,
+            last_layer=self.get_last_layer(),
+            split="train",
+            enc_last_layer=enc_last_layer
+        )
 
-        self.log("discloss", discloss, prog_bar=True, logger=True, on_step=True, on_epoch=True)
-        self.log_dict(log_dict_disc, prog_bar=False, logger=True, on_step=True, on_epoch=False)
-        # return discloss
+        self.log(
+            "discloss",
+            discloss,
+            prog_bar=True,
+            logger=True,
+            on_step=True,
+            on_epoch=True
+        )
+        self.log_dict(
+            log_dict_disc,
+            prog_bar=False,
+            logger=True,
+            on_step=True,
+            on_epoch=False
+        )
 
         disc_opt.zero_grad()
         self.manual_backward(discloss)
         disc_opt.step()
 
+    # ------------------------------------------------------------------
+    # Validation
+    # ------------------------------------------------------------------
     def validation_step(self, batch, batch_idx, dataloader_idx=0, data_type=None):
-        inputs = self.get_input(batch, self.image_key)
-        if self.input_mode == 1: 
-            ll1, _ = self.dwt(inputs) # low frequency components
-            ll1 = ll1 / 2 # normalize
-            inputs = F.interpolate(ll1, size=256, mode='bicubic', align_corners=False)
-        elif self.input_mode == 2:
-            _, hs = self.dwt(inputs) # high frequency components
-            h1 = hs[0] / 2 # normalize
-            inputs = h1.view(-1, 9, 128, 128)
-        reconstructions, posterior, z, aux_feature = self(inputs)
-        enc_last_layer = self.encoder.conv_out.weight
-        aeloss, log_dict_ae = self.loss(inputs, reconstructions, posterior, 0, self.global_step,
-                                        last_layer=self.get_last_layer(), split="val", z=z, aux_feature=aux_feature, 
-                                        enc_last_layer=enc_last_layer)
+        inputs_real = self.get_input(batch, self.image_key)
+        inputs = self.prepare_vae_input(inputs_real)
 
-        discloss, log_dict_disc = self.loss(inputs, reconstructions, posterior, 1, self.global_step,
-                                            last_layer=self.get_last_layer(), split="val", enc_last_layer=enc_last_layer)
+        reconstructions, posterior, z, aux_feature = self(inputs)
+
+        if reconstructions.shape != inputs.shape:
+            raise RuntimeError(
+                "Validation reconstruction shape mismatch: "
+                f"target={tuple(inputs.shape)}, "
+                f"reconstruction={tuple(reconstructions.shape)}"
+            )
+
+        enc_last_layer = self.encoder.conv_out.weight
+
+        aeloss, log_dict_ae = self.loss(
+            inputs,
+            reconstructions,
+            posterior,
+            0,
+            self.global_step,
+            last_layer=self.get_last_layer(),
+            split="val",
+            z=z,
+            aux_feature=aux_feature,
+            enc_last_layer=enc_last_layer
+        )
+
+        discloss, log_dict_disc = self.loss(
+            inputs,
+            reconstructions,
+            posterior,
+            1,
+            self.global_step,
+            last_layer=self.get_last_layer(),
+            split="val",
+            enc_last_layer=enc_last_layer
+        )
 
         self.log("val/rec_loss", log_dict_ae["val/rec_loss"])
         self.log_dict(log_dict_ae)
         self.log_dict(log_dict_disc)
+
         return self.log_dict
 
+    # ------------------------------------------------------------------
+    # Optimizers
+    # ------------------------------------------------------------------
     def configure_optimizers(self):
         lr = self.learning_rate
-        params = (list(self.encoder.parameters()) +
-                 list(self.decoder.parameters()) +
-                 list(self.quant_conv.parameters()) +
-                 list(self.post_quant_conv.parameters()))
-        
+
+        params = (
+            list(self.encoder.parameters()) +
+            list(self.decoder.parameters()) +
+            list(self.quant_conv.parameters()) +
+            list(self.post_quant_conv.parameters())
+        )
+
         if self.use_vf is not None and not self.proj_fix:
             params += list(self.linear_proj.parameters())
-            
-        opt_ae = torch.optim.Adam(params, lr=lr, betas=(0.5, 0.9))
 
-        opt_disc = torch.optim.Adam(self.loss.discriminator.parameters(),
-                                    lr=lr, betas=(0.5, 0.9))
+        opt_ae = torch.optim.Adam(
+            params,
+            lr=lr,
+            betas=(0.5, 0.9)
+        )
+
+        opt_disc = torch.optim.Adam(
+            self.loss.discriminator.parameters(),
+            lr=lr,
+            betas=(0.5, 0.9)
+        )
+
         return [opt_ae, opt_disc], []
 
     def get_last_layer(self):
         return self.decoder.conv_out.weight
-    
+
+    # ------------------------------------------------------------------
+    # Logging / visualization
+    # ------------------------------------------------------------------
     @torch.no_grad()
     def log_images(self, batch, only_inputs=False, **kwargs):
-        log = dict()
+        log = {}
+
         x_real = self.get_input(batch, self.image_key)
         x_real = x_real.to(self.device)
-        if self.input_mode == 1:
-            ll1, _ = self.dwt(x_real) # low frequency components
-            ll1 = ll1 / 2 # normalize
-            x = F.interpolate(ll1, size=256, mode='bicubic', align_corners=False)
-        elif self.input_mode == 2:
-            _, hs = self.dwt(x_real) # high frequency components
-            h1 = hs[0] / 2 # normalize
-            x = h1.view(-1, 9, 128, 128)
-        
-        if not only_inputs:
-            xrec, posterior, z, aux_features = self(x)
-            """
-            if x.shape[1] > 3:
-                # colorize with random projection
-                assert xrec.shape[1] > 3
-                x = self.to_rgb(x)
-                xrec = self.to_rgb(xrec)
-            """
-            
-            xsample = self.decode(torch.randn_like(posterior.sample()))
-            if self.input_mode == 2:
-                #xsample = xsample.view(xsample.shape[0], 3, 3, 128, 128)
-                #xsample = xsample.reshape(xsample.shape[0], 3, 128 * 3, 128)
-                #xrec = xrec.view(xrec.shape[0], 3, 3, 128, 128)
-                #xrec = xrec.reshape(xrec.shape[0], 3, 128 * 3, 128)
-                xrec = xrec.reshape(xrec.shape[0],3,256,256)
-            log["samples"] = xsample
-            log["reconstructions"] = xrec
 
-        #if self.input_mode == 2:
-            #x = x.view(x.shape[0], 3, 3, 128, 128)
-            #x = x.reshape(x.shape[0], 3, 128 * 3, 128)
+        # Always log original RGB as a reference.
         log["inputs"] = x_real
+
+        x = self.prepare_vae_input(x_real)
+
+        # --------------------------------------------------------------
+        # High-frequency VAE
+        # --------------------------------------------------------------
+        if self.input_mode == 2:
+            # Original HF target visualization.
+            lh_in, hl_in, hh_in = self._hf9_to_bands(x)
+
+            log["hf_LH_input"] = self._normalize_hf_for_vis(lh_in)
+            log["hf_HL_input"] = self._normalize_hf_for_vis(hl_in)
+            log["hf_HH_input"] = self._normalize_hf_for_vis(hh_in)
+
+            if only_inputs:
+                return log
+
+            # Reconstructed HF visualization.
+            xrec, posterior, z, aux_features = self(x)
+
+            lh_rec, hl_rec, hh_rec = self._hf9_to_bands(xrec)
+
+            log["hf_LH_reconstruction"] = self._normalize_hf_for_vis(lh_rec)
+            log["hf_HL_reconstruction"] = self._normalize_hf_for_vis(hl_rec)
+            log["hf_HH_reconstruction"] = self._normalize_hf_for_vis(hh_rec)
+
+            # Optional random samples from the VAE prior, also shown as bands.
+            zsample = torch.randn_like(posterior.sample())
+            xsample = self.decode(zsample)
+
+            lh_s, hl_s, hh_s = self._hf9_to_bands(xsample)
+
+            log["hf_LH_sample"] = self._normalize_hf_for_vis(lh_s)
+            log["hf_HL_sample"] = self._normalize_hf_for_vis(hl_s)
+            log["hf_HH_sample"] = self._normalize_hf_for_vis(hh_s)
+
+            return log
+
+        # --------------------------------------------------------------
+        # Low-frequency VAE
+        # --------------------------------------------------------------
+        if self.input_mode == 1:
+            log["low_input"] = x
+
+            if only_inputs:
+                return log
+
+            xrec, posterior, z, aux_features = self(x)
+            log["low_reconstruction"] = xrec
+
+            zsample = torch.randn_like(posterior.sample())
+            log["low_sample"] = self.decode(zsample)
+
+            return log
+
+        # --------------------------------------------------------------
+        # Normal RGB VAE
+        # --------------------------------------------------------------
+        if only_inputs:
+            return log
+
+        xrec, posterior, z, aux_features = self(x)
+        log["reconstructions"] = xrec
+
+        zsample = torch.randn_like(posterior.sample())
+        log["samples"] = self.decode(zsample)
+
         return log
 
     def to_rgb(self, x):
         assert self.image_key == "segmentation"
+
         if not hasattr(self, "colorize"):
-            self.register_buffer("colorize", torch.randn(3, x.shape[1], 1, 1).to(x))
+            self.register_buffer(
+                "colorize",
+                torch.randn(3, x.shape[1], 1, 1).to(x)
+            )
+
         x = F.conv2d(x, weight=self.colorize)
-        x = 2.*(x-x.min())/(x.max()-x.min()) - 1.
+        x = 2. * (x - x.min()) / (x.max() - x.min()) - 1.
+
         return x
 
 
@@ -540,3 +791,4 @@ class IdentityFirstStage(torch.nn.Module):
 
     def forward(self, x, *args, **kwargs):
         return x
+
