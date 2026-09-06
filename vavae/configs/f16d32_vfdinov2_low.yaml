@@ -45,7 +45,7 @@ model:
 data:
   target: main.DataModuleFromConfig
   params:
-    batch_size: 16 # batch size per GPU
+    batch_size: 8 # batch size per GPU
     wrap: true
     train:
       target: ldm.data.imagenet.ImageNetTrain
@@ -58,8 +58,10 @@ data:
 
 lightning:
   trainer:
-    strategy: ddp_find_unused_parameters_true
+    strategy: ddp
     accelerator: gpu
     max_epochs: 80
     precision: 32
+  
+
   
