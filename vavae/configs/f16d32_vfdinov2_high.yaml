@@ -18,7 +18,7 @@ model:
         disc_start: 5001
         kl_weight: 1.0e-06
         disc_weight: 0.5
-        disc_in_channels: 3
+        disc_in_channels: 9
         perceptual_weight: 0.0
         # hyper-param for vision foundation model alignment
         # --------------------------------------------------
@@ -32,7 +32,7 @@ model:
       z_channels: 8
       resolution: 128   
       in_channels: 9
-      out_ch: 3
+      out_ch: 9
       ch:  128 
       ch_mult:
       - 1
@@ -60,8 +60,9 @@ data:
 
 lightning:
   trainer:
-    strategy: ddp_find_unused_parameters_true
+    strategy: ddp
     accelerator: gpu
     max_epochs: 80
     precision: 32
   
+
