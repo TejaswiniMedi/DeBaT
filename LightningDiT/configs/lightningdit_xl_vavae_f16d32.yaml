@@ -34,7 +34,7 @@ model:
   use_rope: true
   use_rmsnorm: true
   wo_shift: false
-  in_chans: 32
+  in_chans: 64
 
 # recommend to use default settings
 train:
