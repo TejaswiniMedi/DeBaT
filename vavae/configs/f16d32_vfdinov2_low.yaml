@@ -1,4 +1,4 @@
-ckpt_path: /ceph/tmedi/DeBaT/logs/f16d32_vfdinov2_low/checkpoints/last.ckpt # used for testing only, add your ckpt path if you want to test the model
+ckpt_path: /path/to/ckpt # used for testing only, add your ckpt path if you want to test the model
 # weight_init: /path/to/weight_init # if you want to finetune va-vae on your own dataset, add your weight_init path
 
 model:
@@ -6,8 +6,9 @@ model:
   target: ldm.models.autoencoder.AutoencoderKL
   params:
     monitor: val/rec_loss
-    embed_dim: 16
-    input_mode: 1 # low frequency components 
+    embed_dim: 32
+    input_mode: 1 # low frequency: bicubic_up(LL / 2) -> [B, 3, 256, 256]
+    # hyper-param for vision foundation model alignment
     # --------------------------------------------------
     use_vf: dinov2
     reverse_proj: true        # default: true, project from vae dim --> dinov2 dim
@@ -27,7 +28,7 @@ model:
         # --------------------------------------------------
     ddconfig:
       double_z: true
-      z_channels: 8
+      z_channels: 32
       resolution: 256
       in_channels: 3
       out_ch: 3
@@ -45,7 +46,7 @@ model:
 data:
   target: main.DataModuleFromConfig
   params:
-    batch_size: 8 # batch size per GPU
+    batch_size: 32 # batch size per GPU (4x the upstream 8)
     wrap: true
     train:
       target: ldm.data.imagenet.ImageNetTrain
@@ -58,10 +59,11 @@ data:
 
 lightning:
   trainer:
-    strategy: ddp
+    # main.py ignores devices/num_nodes here: it uses every visible GPU and --num_nodes.
+    strategy: ddp # PL 1.9.5: plain ddp already uses find_unused_parameters=True (the _true name is PL 2.x only)
     accelerator: gpu
-    max_epochs: 80
+    max_epochs: 50
     precision: 32
-  
+
 
   
