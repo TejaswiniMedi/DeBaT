@@ -1,4 +1,4 @@
-ckpt_path: /ceph/tmedi/DeBaT/logs/f16d32_vfdinov2_high/checkpoints/last.ckpt # used for testing only, add your ckpt path if you want to test the model
+ckpt_path: /path/to/ckpt # used for testing only, add your ckpt path if you want to test the model
 # weight_init: /path/to/weight_init # if you want to finetune va-vae on your own dataset, add your weight_init path
 
 model:
@@ -6,11 +6,12 @@ model:
   target: ldm.models.autoencoder.AutoencoderKL
   params:
     monitor: val/rec_loss
-    embed_dim: 16
-    input_mode: 2 # high frequency components 
+    embed_dim: 32
+    input_mode: 2 # high frequency: Haar (LH, HL, HH) / 2 -> [B, 9, 128, 128]
+    # DINOv2 alignment and LPIPS need RGB, so both are off for the 9-channel HF input.
     # --------------------------------------------------
     use_vf: null
-    reverse_proj: true        
+    reverse_proj: true
     # --------------------------------------------------
     lossconfig:
       target: ldm.modules.losses.LPIPSWithDiscriminator
@@ -20,7 +21,7 @@ model:
         disc_weight: 0.5
         disc_in_channels: 9
         perceptual_weight: 0.0
-        # hyper-param for vision foundation model alignment
+        # hyper-param for vision foundation model alignment (unused with use_vf: null)
         # --------------------------------------------------
         vf_weight: 0.1
         adaptive_vf: true
@@ -29,17 +30,16 @@ model:
         # --------------------------------------------------
     ddconfig:
       double_z: true
-      z_channels: 8
-      resolution: 128   
+      z_channels: 32
+      resolution: 128
       in_channels: 9
       out_ch: 9
-      ch:  128 
-      ch_mult:
+      ch: 128
+      ch_mult: # 4 levels: 128 / 8 = 16x16 latent, same grid as the low branch
       - 1
-      - 1   
+      - 1
       - 2
       - 2
-      #- 4
       num_res_blocks: 2
       attn_resolutions:
       - 16
@@ -47,7 +47,7 @@ model:
 data:
   target: main.DataModuleFromConfig
   params:
-    batch_size: 16   # batch size per GPU
+    batch_size: 8 # batch size per GPU
     wrap: true
     train:
       target: ldm.data.imagenet.ImageNetTrain
@@ -60,9 +60,10 @@ data:
 
 lightning:
   trainer:
-    strategy: ddp
+    # main.py ignores devices/num_nodes here: it uses every visible GPU and --num_nodes.
+    strategy: ddp # PL 1.9.5: plain ddp already uses find_unused_parameters=True (the _true name is PL 2.x only)
     accelerator: gpu
-    max_epochs: 80
+    max_epochs: 50
     precision: 32
-  
+
 
