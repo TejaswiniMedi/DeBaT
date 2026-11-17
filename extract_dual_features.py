@@ -4,12 +4,12 @@ Extract concatenated low/high-frequency VA-VAE latents in LightningDiT format.
 
 Output shard format (compatible with LightningDiT ImgLatentDataset):
     latents_rank00_shard000.safetensors
-      - latents:      [N, 32, 16, 16]
-      - latents_flip: [N, 32, 16, 16]
+      - latents:      [N, 64, 16, 16]
+      - latents_flip: [N, 64, 16, 16]
       - labels:       [N]
     latents_stats.pt
-      - mean: [1, 32, 1, 1]
-      - std:  [1, 32, 1, 1]
+      - mean: [1, 64, 1, 1]
+      - std:  [1, 64, 1, 1]
 
 The frequency preprocessing exactly follows this DeBaT codebase:
   low:  Haar-DWT LL / 2 -> bicubic back to 256x256 -> low VA-VAE
@@ -164,7 +164,7 @@ def load_debat_vavae(config_path: str, ckpt_path: str, vavae_root: str, device):
 
 @torch.inference_mode()
 def encode_dual_frequency(images, low_model, high_model, use_mode=False):
-    """Return [B, 32, 16, 16] = cat([low_z, high_z], dim=1)."""
+    """Return [B, 64, 16, 16] = cat([low_z, high_z], dim=1)."""
     # Low-frequency preprocessing copied from AutoencoderKL.training_step.
     ll1, _ = low_model.dwt(images)
     low_input = F.interpolate(
@@ -249,7 +249,7 @@ def flush_exact_shards(buffers, output_dir, rank, shard_idx, shard_size, force=F
 def compute_latent_stats(data_dir: str, max_samples: int = 10000, seed: int = 42):
     """
     Compute LightningDiT-style per-channel mean/std over normal (non-flipped)
-    latents, but streaming to avoid holding ~650 MB for 10k x 32ch latents.
+    latents, but streaming to avoid holding ~650 MB for 10k x 64ch latents.
     """
     files = sorted(glob(os.path.join(data_dir, "*.safetensors")))
     if not files:
@@ -378,9 +378,9 @@ def main(args):
                 f"[rank {rank}] latent shape={tuple(z.shape)}, "
                 f"low channels={z.shape[1] // 2}, high channels={z.shape[1] // 2}"
             )
-            if z.shape[1:] != (32, 16, 16):
+            if z.shape[1:] != (64, 16, 16):
                 raise RuntimeError(
-                    f"Expected concatenated latent [B,32,16,16], got {tuple(z.shape)}"
+                    f"Expected concatenated latent [B,64,16,16], got {tuple(z.shape)}"
                 )
 
         z = z.to(dtype=save_dtype).cpu()
@@ -417,7 +417,7 @@ def main(args):
         )
         print("\nDone.")
         print(f"LightningDiT data_path: {output_dir}")
-        print("Set model.in_chans: 32 and keep vae.downsample_ratio: 16")
+        print("Set model.in_chans: 64 and keep vae.downsample_ratio: 16")
 
     barrier(distributed)
     if distributed:
